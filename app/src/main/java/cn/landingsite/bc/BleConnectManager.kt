@@ -1,37 +1,36 @@
 package cn.landingsite.bc
 
 import android.Manifest
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
-import android.content.pm.PackageManager
 import android.util.Log
 import androidx.annotation.RequiresPermission
-import androidx.core.app.ActivityCompat
-import android.bluetooth.BluetoothManager
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 
-// 单例蓝牙连接管理
 object BleConnectManager {
-    private var bluetoothGatt: BluetoothGatt? = null
-
     private const val TAG = "BleConnectManager"
 
-    // GATT 回调监听
+    private val _gattReady = MutableStateFlow(false)
+    val gattReady: StateFlow<Boolean> = _gattReady.asStateFlow()
+
+    private var bluetoothGatt: BluetoothGatt? = null
+
     private val gattCallback = object : BluetoothGattCallback() {
-        // 连接状态变化
         @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
         override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
             super.onConnectionStateChange(gatt, status, newState)
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.i(TAG, "BLE 连接成功")
-                // 连接成功后发现服务
-
+                Log.i(TAG, "BLE Connected")
                 gatt?.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                Log.e(TAG, "BLE 连接断开/失败")
+                Log.e(TAG, "BLE Disconnected")
+                _gattReady.value = false
                 closeGatt()
             }
         }
@@ -40,7 +39,9 @@ object BleConnectManager {
         override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
             super.onServicesDiscovered(gatt, status)
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i(TAG, "服务发现完成，可以开始读写特征值做配置")
+                Log.i(TAG, "GATT success, 可以开始读写特征值做配置")
+                bluetoothGatt = gatt
+                _gattReady.value = true
             }
         }
     }
