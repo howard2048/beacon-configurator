@@ -87,15 +87,32 @@ class MainActivity : ComponentActivity() {
         if (!adapter.isEnabled) return
         Log.i(TAG, "BLE adapter is enabled")
         val settings =
-            ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+            ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
 
         leScanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 result?.also { result ->
                     val device = result.device;
-//                    Log.d(TAG, "mac: " + device.address + ", rssi:" + result.rssi);
+                    val mac = device.address;
+                    if (mac.equals("CF:2F:3C:9E:1F:63", true)) {
+                        Log.d(TAG, "mac: " + device.address + ", rssi:" + result.rssi);
+                        val scanned = result.scanRecord?.bytes
+                        scanned?.let { bytes ->
+                            val hex = bytes.joinToString("") {
+                                String.format("%02X", it)
+                            }
+                            Log.i(TAG, hex)
+                        }
+                    }
                 } ?: return
-                parseIBeacon(result)?.let { onFound(it) }
+                val device = result.device;
+                val mac = device.address;
+                val rssi = result.rssi
+                val scanned = result.scanRecord?.bytes
+                if (scanned != null) {
+                    val beacon = parseIBeacon(scanned, mac, rssi)?.let { onFound(it) }
+                }
             }
         }
         if (ActivityCompat.checkSelfPermission(
@@ -138,19 +155,44 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun parseIBeacon(result: ScanResult): IBeacon? {
-        val bytes = result.scanRecord?.bytes ?: return null
-        if (bytes.size < 25) return null
-        if (bytes[4] != 0x02.toByte() || bytes[5] != 0x15.toByte()) return null
+    fun parseIBeacon(rawBytes: ByteArray, mac: String, rssi: Int): IBeacon? {
+        // iBeacon 特征：Apple 0x004C + 0215
+        val pattern = byteArrayOf(0x4C, 0x00, 0x02, 0x15)
 
-        val mac = result.device.address
-        val uuidBuf = bytes.copyOfRange(6, 22)
-        val uuid = bytesToUuid(uuidBuf)
+        // 遍历寻找特征头位置
+        for (i in 0 until rawBytes.size - pattern.size) {
+            var match = true
+            for (j in pattern.indices) {
+                if (rawBytes[i + j] != pattern[j]) {
+                    match = false
+                    break
+                }
+            }
+            if (!match) continue
 
-        val major = (bytes[22].toInt() and 0xFF) shl 8 or (bytes[23].toInt() and 0xFF)
-        val minor = (bytes[24].toInt() and 0xFF) shl 8 or (bytes[25].toInt() and 0xFF)
-        Log.i(TAG, "Found iBeacon: $uuid, major: $major, minor: $minor")
-        return IBeacon(mac, uuid, major, minor, result.rssi)
+            // 特征头命中，往后读21字节：16UUID + 2Major + 2Minor + 1TxPower
+            val base = i + pattern.size
+            if (base + 21 > rawBytes.size) return null
+
+            // 16字节 UUID
+            val uuidBuf = rawBytes.copyOfRange(base, base + 16)
+            val uuid = uuidBuf.joinToString("") { String.format("%02X", it) }
+                .replace(Regex("(.{8})(.{4})(.{4})(.{4})(.{12})"), "$1-$2-$3-$4-$5")
+
+            // Major 2字节
+            val major = (rawBytes[base + 16].toInt() and 0xFF) shl 8 or
+                    (rawBytes[base + 17].toInt() and 0xFF)
+            // Minor 2字节
+            val minor = (rawBytes[base + 18].toInt() and 0xFF) shl 8 or
+                    (rawBytes[base + 19].toInt() and 0xFF)
+
+            // TxPower 1字节
+            val txPower = rawBytes[base + 20].toInt()
+
+            return IBeacon(uuid, major, minor, txPower, mac, rssi)
+        }
+        // 没找到iBeacon特征
+        return null
     }
 
     private fun bytesToUuid(bytes: ByteArray): String {
