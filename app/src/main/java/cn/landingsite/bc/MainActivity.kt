@@ -4,16 +4,22 @@ import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelUuid
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresPermission
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -26,15 +32,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
-    private var leScanCallback: ScanCallback? = null
+
     private val TAG = javaClass.simpleName
+
+    private var bluetoothAdapter: BluetoothAdapter? = null
+    private var leScanCallback: ScanCallback? = null
+
+    private val uuids = listOf(
+        UUID.fromString("0000B0FF-0000-1000-8000-00805F9B34FB")
+    )
 
     private fun requestBlePermissions() {
         val list = mutableListOf<String>()
@@ -58,7 +76,6 @@ class MainActivity : ComponentActivity() {
                 Log.e("BT_PERM", "蓝牙权限有被拒绝")
             }
         }
-    private var bluetoothAdapter: BluetoothAdapter? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -81,37 +98,46 @@ class MainActivity : ComponentActivity() {
 
     }
 
-    fun startBleScan(onFound: (IBeacon) -> Unit) {
+    fun startBleScan(onFound: (Beacon) -> Unit) {
         Log.i(TAG, "starting to scan..")
         val adapter = bluetoothAdapter ?: return
         if (!adapter.isEnabled) return
         Log.i(TAG, "BLE adapter is enabled")
+
+        val filters = mutableListOf<ScanFilter>()
+        for (uuid in uuids) {
+            val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(uuid)).build()
+            filters.add(filter)
+        }
         val settings =
             ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build()
 
         leScanCallback = object : ScanCallback() {
+            @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 result?.also { result ->
                     val device = result.device;
                     val mac = device.address;
                     if (mac.equals("CF:2F:3C:9E:1F:63", true)) {
-                        Log.d(TAG, "mac: " + device.address + ", rssi:" + result.rssi);
+//                        Log.d(TAG, "mac: " + device.address + ", rssi:" + result.rssi);
                         val scanned = result.scanRecord?.bytes
                         scanned?.let { bytes ->
                             val hex = bytes.joinToString("") {
                                 String.format("%02X", it)
                             }
-                            Log.i(TAG, hex)
+//                            Log.i(TAG, hex)
                         }
                     }
                 } ?: return
                 val device = result.device;
+                val name = device?.name ?: ""
                 val mac = device.address;
                 val rssi = result.rssi
-                val scanned = result.scanRecord?.bytes
-                if (scanned != null) {
-                    val beacon = parseIBeacon(scanned, mac, rssi)?.let { onFound(it) }
+                val bytes = result.scanRecord?.bytes ?: byteArrayOf()
+                val connectable = result.isConnectable
+                if (rssi >= -80) {
+                    onFound(Beacon(name, mac, rssi, bytes, connectable))
                 }
             }
         }
@@ -121,13 +147,6 @@ class MainActivity : ComponentActivity() {
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             Log.w(TAG, "no permission");
-            // TODO: Consider calling
-            //    ActivityCompat#requestPermissions
-            // here to request the missing permissions, and then overriding
-            //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
-            //                                          int[] grantResults)
-            // to handle the case where the user grants the permission. See the documentation
-            // for ActivityCompat#requestPermissions for more details.
             return
         }
         bluetoothAdapter?.bluetoothLeScanner?.startScan(null, settings, leScanCallback)
@@ -142,13 +161,6 @@ class MainActivity : ComponentActivity() {
                 ) != PackageManager.PERMISSION_GRANTED
             ) {
                 Log.w(TAG, "no permission2");
-                // TODO: Consider calling
-                //    ActivityCompat#requestPermissions
-                // here to request the missing permissions, and then overriding
-                //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
-                //                                          int[] grantResults)
-                // to handle the case where the user grants the permission. See the documentation
-                // for ActivityCompat#requestPermissions for more details.
                 return
             }
             bluetoothAdapter?.bluetoothLeScanner?.stopScan(it)
@@ -213,7 +225,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun BeaconScanPage() {
     val activity = LocalContext.current as MainActivity
-    val beaconList = remember { mutableStateListOf<IBeacon>() }
+    val beacons = remember { mutableStateListOf<Beacon>() }
     val scanning = remember { mutableStateOf(false) }
 
     Column(
@@ -224,14 +236,22 @@ fun BeaconScanPage() {
         Button(
             onClick = {
                 if (!scanning.value) {
-                    beaconList.clear()
+                    beacons.clear()
                     activity.startBleScan { beacon ->
-                        if (beaconList.none { it.mac == beacon.mac }) {
-                            beaconList.add(beacon)
+                        // 先找列表里有没有同MAC设备
+                        val pos = beacons.indexOfFirst { it.mac == beacon.mac }
+                        if (pos == -1) {
+                            // 没有：新增
+                            beacons.add(beacon)
+                        } else {
+                            // 已有：直接覆盖更新最新RSSI和信息
+                            beacons[pos] = beacon
                         }
+//                        beacons.sortByDescending { it.rssi }
                     }
                     scanning.value = true
                 } else {
+//                    beacons.clear()
                     activity.stopBleScan()
                     scanning.value = false
                 }
@@ -245,25 +265,59 @@ fun BeaconScanPage() {
                 .fillMaxSize()
                 .padding(top = 16.dp)
         ) {
-            items(beaconList) { item ->
-                BeaconListItem(item)
+            items(beacons) { item ->
+                BeaconListItem(beacon = item, onConnectClick = { beacon ->
+                    if (ActivityCompat.checkSelfPermission(
+                            activity,
+                            Manifest.permission.BLUETOOTH_CONNECT
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        return@BeaconListItem
+                    }
+                    val result = BleConnectManager.connectDevice(activity, beacon.mac)
+
+                })
             }
         }
     }
 }
 
+const val TAG = "X"
+
 @Composable
-fun BeaconListItem(beacon: IBeacon) {
+fun BeaconListItem(beacon: Beacon, onConnectClick: (Beacon) -> Unit) {
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text("MAC: ${beacon.mac}")
-            Text("UUID: ${beacon.uuid}")
-            Text("Major: ${beacon.major}  Minor: ${beacon.minor}")
-            Text("RSSI: ${beacon.rssi}")
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(0.7f)) {
+                Text(
+                    text = beacon.name.ifBlank { "N/A" },
+                    color = if (beacon.name.isBlank()) Color.Gray else Color.Unspecified,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(text = beacon.mac)
+                Text(text = "RSSI: ${beacon.rssi}", fontSize = 12.sp)
+            }
+            Button(
+                onClick = {
+                    onConnectClick(beacon)
+                },
+                enabled = beacon.connectable,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(text = "Connect", fontSize = 12.sp)
+            }
         }
     }
 }
